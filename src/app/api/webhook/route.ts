@@ -408,7 +408,7 @@ async function generateAndSendReply(igAccountId: string, conversationId: string)
           })
           .filter((m) => m.content.length > 0)
       ),
-      { systemPrompt: captured ? `${account.systemPrompt}\n\n${captured}` : account.systemPrompt }
+      { systemPrompt: account.systemPrompt, context: captured || undefined }
     );
 
     // If the AI appended a reservation/takeaway handoff line — or a REVIEW line for a matter that
@@ -843,10 +843,14 @@ async function recordUsage(
   ai: Awaited<ReturnType<typeof getAIResponse>>
 ) {
   if (ai.provider === "none") return;
-  // Haiku 4.5: $1/1M in, $5/1M out -> cents per token.
+  // Haiku 4.5 in cents per million tokens: $1 input, $5 output; prompt-cache writes cost 2x input
+  // (ai.ts uses the one-hour TTL — the 5-minute one is 1.25x) and reads 0.1x. The API reports cached tokens separately from input_tokens, so leaving
+  // them out would under-bill every reply that hits the cache.
+  const cacheRead = ai.cacheReadTokens ?? 0;
+  const cacheWrite = ai.cacheWriteTokens ?? 0;
   const costCents =
     ai.provider === "claude" && ai.inputTokens != null && ai.outputTokens != null
-      ? (ai.inputTokens / 1_000_000) * 100 + (ai.outputTokens / 1_000_000) * 500
+      ? (ai.inputTokens * 100 + cacheWrite * 200 + cacheRead * 10 + ai.outputTokens * 500) / 1_000_000
       : 0;
 
   await supabaseAdmin.from("usage_events").insert({
@@ -855,7 +859,9 @@ async function recordUsage(
     instagram_account_id: account.accountId,
     kind: "ai_reply",
     model: ai.model,
-    input_tokens: ai.inputTokens,
+    // Every input token the model read, cached or not — keeps the dashboards' token totals
+    // comparable with the months before caching. cost_cents carries the actual price.
+    input_tokens: ai.inputTokens == null ? null : ai.inputTokens + cacheRead + cacheWrite,
     output_tokens: ai.outputTokens,
     cost_cents: costCents,
   });

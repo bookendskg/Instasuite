@@ -5,6 +5,9 @@ type ChatMessage = { role: "user" | "assistant"; content: string };
 export type AIOptions = {
   /** The tenant's script, resolved by the caller from account -> business. */
   systemPrompt: string;
+  /** Per-conversation notes (what we've already captured from this guest). Sent AFTER the
+   *  cache breakpoint, so it can change every turn without invalidating the cached script. */
+  context?: string;
   model?: string;
 };
 
@@ -13,8 +16,13 @@ export type AIResult = {
   /** Which provider answered — callers meter usage off this. "none" == Claude couldn't. */
   provider: "claude" | "none";
   model: string | null;
+  /** Uncached input tokens only — the API excludes cache reads and writes from this. */
   inputTokens: number | null;
   outputTokens: number | null;
+  /** Input tokens served from the prompt cache (billed at 0.1x). */
+  cacheReadTokens?: number | null;
+  /** Input tokens written to the prompt cache (billed at 1.25x). */
+  cacheWriteTokens?: number | null;
   /**
    * True when Claude could not produce a usable reply (paused key, outage, or refusal)
    * and `text` is a safe holding message. The caller should hand the conversation to a
@@ -121,11 +129,11 @@ const REPLY_GUARD = [
   // A guest typed "17th sep" on the 18th and the agent called it "tomorrow morning", and turned a bare
   // "8:30" into 8:30 AM for what was a dinner booking. The webhook now refuses to capture a past booking
   // (isPastBooking), but the model should never recap one in the first place.
-  "Before recapping a reservation or pickup, compare its date and time with the current date and time above. If it has already passed, don't recap it — say so and ask for a future date and time. A date earlier than today is almost always a typo: ask, never assume. If a time has no am/pm and both are possible that day, ask which.",
+  "Before recapping a reservation or pickup, compare its date and time with the current date and time. If it has already passed, don't recap it — say so and ask for a future date and time. A date earlier than today is almost always a typo: ask, never assume. If a time has no am/pm and both are possible that day, ask which.",
   // A guest wrote "24 September 2026, Thursday" and the agent recapped "Thursday, 26 September" — the
   // 26th is a Saturday. It was only ever told today's date and had to count forward to find a weekday,
   // and it counted wrong in 5 of 8 replays of that chat. calendarBlock() below now hands it the answer.
-  "Every weekday and date you write must come from the Calendar above — look it up, never work one out yourself. Keep the date the guest gave; never move it to fit a weekday. If the guest's weekday and date disagree with the Calendar, ask which one they meant before recapping.",
+  "Every weekday and date you write must come from the Calendar — look it up, never work one out yourself. Keep the date the guest gave; never move it to fit a weekday. If the guest's weekday and date disagree with the Calendar, ask which one they meant before recapping.",
   "Keep every reply under 900 characters — Instagram rejects anything longer and the guest receives NOTHING. Never paste a long list of items: send the menu link, or name a few options and offer to say more.",
   "Once you have FINALIZED a reservation or takeaway earlier in this conversation (you confirmed it back to the guest and/or emitted its hand-off line), treat any LATER message as a fresh request and respond to what it actually asks — if they want another reservation or order, start collecting its details; otherwise just answer their question. Do NOT resume, re-confirm, or re-emit the hand-off for the finished order, and do NOT restart with a generic greeting (you have already greeted them). Only revisit a past order if the guest explicitly asks about it (to check or change it). You may reuse their name, contact and preferences, and emit a new hand-off line only when they actually place a new order.",
 ].join("\n");
@@ -195,7 +203,30 @@ export async function getAIResponse(
     dateStyle: "full",
     timeStyle: "short",
   });
-  const system = `${options.systemPrompt}\n\nCurrent date & time (IST): ${nowIst}.\n\n${calendarBlock()}\n\n${REPLY_GUARD}`;
+  // Two blocks, split at a prompt-cache breakpoint. Every reply used to send the whole ~16K-token
+  // script at full price, and input was 99.6% of the bill — which is how the account hit its
+  // usage limit on 20 Sep and the agent went down for two hours. The script and the rules are
+  // identical from one reply to the next, so they are cached and re-read at a tenth of the price;
+  // everything that changes (the clock, the calendar, this guest's captured orders) sits after
+  // the breakpoint, where it can't invalidate anything.
+  //
+  // One-hour TTL, measured rather than guessed: replaying September's 914 replies, only half came
+  // within 5 minutes of the previous one for the same restaurant, so the default 5-minute cache
+  // saved 31%; an hour catches 75% of them and saves 39%, despite writes costing 2x instead of
+  // 1.25x. Every read renews the hour.
+  const system: Anthropic.TextBlockParam[] = [
+    {
+      type: "text",
+      text: `${options.systemPrompt}\n\n${REPLY_GUARD}`,
+      cache_control: { type: "ephemeral", ttl: "1h" },
+    },
+    {
+      type: "text",
+      text: [`Current date & time (IST): ${nowIst}.`, calendarBlock(), options.context]
+        .filter(Boolean)
+        .join("\n\n"),
+    },
+  ];
   const claudeModel = options.model || DEFAULT_CLAUDE_MODEL;
 
   // The API rejects a history that opens with an assistant turn, which is reachable
@@ -209,12 +240,15 @@ export async function getAIResponse(
   if (Date.now() < breakerUntil) return outageResult();
 
   try {
-    const res = await anthropic.messages.create({
-      model: claudeModel,
-      max_tokens: 1024,
-      system,
-      messages: history,
-    });
+    const ask = () =>
+      anthropic.messages.create({ model: claudeModel, max_tokens: 1024, system, messages: history });
+    let res = await ask();
+    // An empty reply to a real guest message is rare but not an outage, and treating it as one
+    // costs the guest a holding message and their chat. One more try before giving up. (The
+    // common cause — asking with no new guest message — is stopped in the webhook, not here.)
+    if (res.stop_reason !== "refusal" && !res.content.some((b) => b.type === "text" && b.text.trim())) {
+      res = await ask();
+    }
 
     if (res.stop_reason === "refusal") {
       // Claude declined — hand to a human rather than push a canned answer.
@@ -224,6 +258,8 @@ export async function getAIResponse(
         model: claudeModel,
         inputTokens: res.usage?.input_tokens ?? null,
         outputTokens: res.usage?.output_tokens ?? null,
+        cacheReadTokens: res.usage?.cache_read_input_tokens ?? null,
+        cacheWriteTokens: res.usage?.cache_creation_input_tokens ?? null,
         unavailable: true,
       };
     }
@@ -252,6 +288,8 @@ export async function getAIResponse(
         model: claudeModel,
         inputTokens: res.usage?.input_tokens ?? null,
         outputTokens: res.usage?.output_tokens ?? null,
+        cacheReadTokens: res.usage?.cache_read_input_tokens ?? null,
+        cacheWriteTokens: res.usage?.cache_creation_input_tokens ?? null,
         unavailable: false,
       };
     }
