@@ -325,6 +325,15 @@ async function generateAndSendReply(igAccountId: string, conversationId: string)
       .limit(20);
     const rows = (rawHistory || []).slice().reverse();
 
+    // Nothing new from the guest since our last message — an earlier run already answered.
+    // Two bubbles more than DEBOUNCE_MS apart get a run each, and when the first run's reply
+    // lands before the second run reads history, the second finds the conversation ending on
+    // OUR turn. Sent to Claude like that, the reply is always empty (4/4 in replay), which we
+    // then treated as an outage: on 21 Sep a guest who had just been asked for her number got
+    // the holding message and her chat was pulled from the agent. A staff reply at the end
+    // means the same thing — someone has already answered.
+    if (rows.length && rows[rows.length - 1].role !== "user") return;
+
     // Debounce may have batched several guest bubbles since the last assistant
     // turn — check intent across all of them, not just the very last one.
     const trailingUserText = [];
