@@ -3,7 +3,7 @@ import { supabaseAdmin } from "@/lib/supabase";
 import { getContext } from "@/lib/ownership";
 import { can, isStaff } from "@/lib/permissions";
 import { logAudit } from "@/lib/audit";
-import { WEEKDAY_NAMES } from "@/lib/ist";
+import { WEEKDAY_NAMES, istToday } from "@/lib/ist";
 
 // Closed days — the third closure list, beside 86'd dishes (/api/unavailable) and closed outlets
 // (/api/unavailable/outlets). Same ownership and gating; the difference is that a row here is a
@@ -104,6 +104,11 @@ export async function POST(request: NextRequest) {
   }
   if (onDate && !/^\d{4}-\d{2}-\d{2}$/.test(onDate)) {
     return Response.json({ error: "Invalid date" }, { status: 400 });
+  }
+  // A past date would save and then vanish at once (the GET drops spent dates), which looks
+  // exactly like a failed save.
+  if (onDate && onDate < istToday()) {
+    return Response.json({ error: "That date has already passed — pick today or later." }, { status: 400 });
   }
 
   if (!(await ownsBusiness(businessId, ctx))) {

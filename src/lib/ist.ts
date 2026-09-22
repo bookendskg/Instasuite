@@ -84,6 +84,82 @@ export function istDayLabel(ms: number): string {
   });
 }
 
+/** Today's IST date as "YYYY-MM-DD" — the `min` for a date picker, so the past can't be chosen. */
+export function istToday(nowMs: number = Date.now()): string {
+  return istDateKey(nowMs);
+}
+
+const SHORT_DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const SHORT_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+const LONG_MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+// "Sun 27 Sep", or with `long` "Sunday 27 September 2026". Built by hand rather than with Intl,
+// whose en-IN data writes "Sept" and adds a comma.
+function dayLabel(ms: number, long = false): string {
+  const d = new Date(ms + IST_OFFSET_MS);
+  return long
+    ? `${WEEKDAY_NAMES[d.getUTCDay()]} ${d.getUTCDate()} ${LONG_MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`
+    : `${SHORT_DAYS[d.getUTCDay()]} ${d.getUTCDate()} ${SHORT_MONTHS[d.getUTCMonth()]}`;
+}
+
+function clockLabel(ms: number): string {
+  return new Date(ms).toLocaleTimeString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+/**
+ * The days a closure covers, in words — shared by the Unavailable list and the AI prompt so the
+ * two can never describe the same row differently.
+ *
+ * A whole-day closure ends at the FOLLOWING midnight, which is how a 27 → 27 range is stored. It
+ * used to be shown as that raw instant, "until Mon, 28 Sept, 12:00 am", which reads as closed on
+ * Monday; and a 25 → 26 range read as "until Sun, 27 Sept", i.e. closed Sunday, when Sunday was
+ * open. Here a midnight end is named by the last day it actually covers, and a start that hasn't
+ * happened yet is always stated.
+ *
+ *   Sun 27 → Sun 27          "Sun 27 Sep (all day)"
+ *   Fri 25 → Sat 26          "Fri 25 Sep – Sat 26 Sep"
+ *   Today                    "today (Tue 22 Sep)"
+ *   started, ends Sat night  "through Sat 26 Sep"
+ *   ends at a set time       "until Wed 23 Sep, 3:00 pm"
+ *   no end                   "until further notice"
+ *
+ * `long` spells dates out in full ("Sunday 27 September 2026") for the AI prompt. With the short
+ * form the agent turned down a Saturday 26 booking because of a Sunday 27 closure in 2 of 5
+ * replays; with the full form, 0 of 8.
+ */
+export function describeWindow(
+  startsAt: string | null,
+  endsAt: string | null,
+  nowMs: number = Date.now(),
+  { long = false }: { long?: boolean } = {}
+): string {
+  const dayLabel_ = (ms: number) => dayLabel(ms, long);
+  const start = startsAt ? new Date(startsAt).getTime() : NaN;
+  const end = endsAt ? new Date(endsAt).getTime() : NaN;
+  const future = !isNaN(start) && start > nowMs;
+  const startIsMidnight = future && istDayStart(start) === start;
+  const from = future ? (startIsMidnight ? dayLabel_(start) : `${dayLabel_(start)}, ${clockLabel(start)}`) : "";
+
+  if (isNaN(end)) return future ? `from ${from}, until further notice` : "until further notice";
+
+  if (istDayStart(end) === end) {
+    const lastDay = end - 86_400_000; // midnight starting the last day covered
+    if (!future) {
+      return lastDay === istDayStart(nowMs) ? `today (${dayLabel_(lastDay)})` : `through ${dayLabel_(lastDay)}`;
+    }
+    if (startIsMidnight && start === lastDay) return `${dayLabel_(lastDay)} (all day)`;
+    return `${from} – ${dayLabel_(lastDay)}`;
+  }
+
+  const until = `until ${dayLabel_(end)}, ${clockLabel(end)}`;
+  return future ? `from ${from} ${until}` : until;
+}
+
 export const WEEKDAY_NAMES = [
   "Sunday",
   "Monday",

@@ -61,8 +61,9 @@ export async function GET() {
   const { data, error } = await query;
   if (error) return Response.json({ error: error.message }, { status: 500 });
 
-  // Hide already-ended rows: the page shows only what's live or upcoming. (The AI block
-  // in availability.ts applies the same active-window filter independently.)
+  // Hide already-ended rows: the page shows only what's live or upcoming. (The AI block in
+  // availability.ts tells the agent only about dishes that are out RIGHT NOW — a dish due to run
+  // out next week is still on today's menu.)
   const now = Date.now();
   const rows = ((data ?? []) as unknown as JoinedRow[])
     .filter((r) => r.ends_at == null || new Date(r.ends_at).getTime() > now)
@@ -127,6 +128,11 @@ export async function POST(request: NextRequest) {
     if (!endsAt) return Response.json({ error: "Invalid end time" }, { status: 400 });
   } else {
     endsAt = endOfIstDay().toISOString(); // "today"
+  }
+  // A window that has already ended would save and then vanish at once (the GET hides ended rows),
+  // which looks exactly like a failed save. The pickers stop this too; a stale tab can't.
+  if (endsAt && new Date(endsAt).getTime() <= Date.now()) {
+    return Response.json({ error: "That date has already passed — pick today or later." }, { status: 400 });
   }
 
   const { data, error } = await supabaseAdmin

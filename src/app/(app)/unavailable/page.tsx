@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Plus, CircleSlash, UtensilsCrossed, Store, AlertTriangle, X, CalendarX } from "lucide-react";
-import { WEEKDAY_NAMES } from "@/lib/ist";
+import { WEEKDAY_NAMES, describeWindow, istToday } from "@/lib/ist";
 
 // Three lists. CLOSED DAYS sits on top — a standing "we don't open Tuesdays" is a different kind of
 // fact from "we ran out of tiramisu", and it outranks both. Below it, two columns: 86'd DISHES (left)
@@ -23,6 +23,7 @@ type DishRow = {
   dish: string;
   outlet: string | null;
   note: string | null;
+  starts_at: string | null;
   ends_at: string | null;
 };
 type ClosedDayRow = {
@@ -38,25 +39,9 @@ type OutletRow = {
   business_name: string | null;
   outlet: string;
   note: string | null;
+  starts_at: string | null;
   ends_at: string | null;
 };
-
-// The restaurant operates in IST; show end times there (consistent with the AI block), regardless of
-// where the operator's browser is.
-function fmtUntil(endsAt: string | null): string {
-  if (!endsAt) return "until further notice";
-  // Weekday included: a window ending several days out used to render as a bare "until 11:59 pm",
-  // which reads as tonight. With dated closures that ambiguity becomes actively misleading.
-  const when = new Date(endsAt).toLocaleString("en-IN", {
-    timeZone: "Asia/Kolkata",
-    weekday: "short",
-    day: "numeric",
-    month: "short",
-    hour: "numeric",
-    minute: "2-digit",
-  });
-  return `until ${when}`;
-}
 
 // Shared Today / Until… / No end control.
 function ScopeToggle({ scope, setScope }: { scope: Scope; setScope: (s: Scope) => void }) {
@@ -314,6 +299,7 @@ function DishColumn({ businesses, businessId, setBusinessId }: ColProps) {
                 <input
                   type="datetime-local"
                   value={until}
+                  min={`${istToday()}T00:00`}
                   onChange={(e) => setUntil(e.target.value)}
                   className={DATE_INPUT}
                 />
@@ -326,15 +312,18 @@ function DishColumn({ businesses, businessId, setBusinessId }: ColProps) {
                   <input
                     type="date"
                     value={fromDate}
+                    min={istToday()}
                     onChange={(e) => setFromDate(e.target.value)}
                     aria-label="From date"
                     className={DATE_INPUT}
                   />
-                  <span className="text-[10px] font-bold text-[var(--text-5)]">to</span>
+                  {/* "to" is a whole day: 27 to 27 closes Sunday only. Said on the field because the
+                      old list label hid it, and a 25-to-26 range was entered for a Sunday closure. */}
+                  <span className="text-[10px] font-bold text-[var(--text-5)]">to (incl.)</span>
                   <input
                     type="date"
                     value={toDate}
-                    min={fromDate || undefined}
+                    min={fromDate || istToday()}
                     onChange={(e) => setToDate(e.target.value)}
                     aria-label="To date (optional)"
                     className={DATE_INPUT}
@@ -400,7 +389,7 @@ function DishColumn({ businesses, businessId, setBusinessId }: ColProps) {
                 )}
               </div>
               <p className="mt-0.5 text-[10px] text-[var(--text-4)]">
-                {fmtUntil(r.ends_at)}
+                {describeWindow(r.starts_at, r.ends_at)}
                 {r.note?.trim() ? ` · ${r.note.trim()}` : ""}
               </p>
             </div>
@@ -526,6 +515,7 @@ function OutletColumn({ businesses, businessId, setBusinessId }: ColProps) {
                 <input
                   type="datetime-local"
                   value={until}
+                  min={`${istToday()}T00:00`}
                   onChange={(e) => setUntil(e.target.value)}
                   className={DATE_INPUT}
                 />
@@ -538,15 +528,18 @@ function OutletColumn({ businesses, businessId, setBusinessId }: ColProps) {
                   <input
                     type="date"
                     value={fromDate}
+                    min={istToday()}
                     onChange={(e) => setFromDate(e.target.value)}
                     aria-label="From date"
                     className={DATE_INPUT}
                   />
-                  <span className="text-[10px] font-bold text-[var(--text-5)]">to</span>
+                  {/* "to" is a whole day: 27 to 27 closes Sunday only. Said on the field because the
+                      old list label hid it, and a 25-to-26 range was entered for a Sunday closure. */}
+                  <span className="text-[10px] font-bold text-[var(--text-5)]">to (incl.)</span>
                   <input
                     type="date"
                     value={toDate}
-                    min={fromDate || undefined}
+                    min={fromDate || istToday()}
                     onChange={(e) => setToDate(e.target.value)}
                     aria-label="To date (optional)"
                     className={DATE_INPUT}
@@ -612,7 +605,7 @@ function OutletColumn({ businesses, businessId, setBusinessId }: ColProps) {
                 )}
               </div>
               <p className="mt-0.5 text-[10px] text-[var(--text-4)]">
-                {fmtUntil(r.ends_at)}
+                {describeWindow(r.starts_at, r.ends_at)}
                 {r.note?.trim() ? ` · ${r.note.trim()}` : ""}
               </p>
             </div>
@@ -768,6 +761,7 @@ function ClosedDaysPanel({ businesses, businessId, setBusinessId }: ColProps) {
                 <input
                   type="date"
                   value={onDate}
+                  min={istToday()}
                   onChange={(e) => setOnDate(e.target.value)}
                   aria-label="Closed date"
                   className={DATE_INPUT}

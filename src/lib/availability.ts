@@ -1,6 +1,7 @@
 import { supabaseAdmin } from "@/lib/supabase";
+import { describeWindow } from "@/lib/ist";
 
-// Renders the currently-86'd dishes AND the currently-closed outlets for a business into a
+// Renders the currently-86'd dishes AND the closed outlets (now or upcoming) for a business into a
 // system-prompt block the AI obeys. tenant.ts appends it AFTER the menu, so "overrides the menu"
 // lands correctly.
 //
@@ -16,7 +17,7 @@ type DishRow = {
   ends_at: string | null;
 };
 
-type OutletRow = {
+export type OutletRow = {
   outlet: string;
   note: string | null;
   starts_at: string;
@@ -109,6 +110,32 @@ export async function isOutletUnavailable(
   }
 }
 
+/**
+ * The prompt section for closed outlets: every closure that hasn't ended yet, upcoming ones included.
+ *
+ * It used to list only closures in effect right now. A closure set today for Sunday was on the
+ * Unavailable page but invisible to the agent until Sunday, so a guest asking for Sunday gave every
+ * detail, got a recap, and was only turned down when isOutletUnavailable caught the booking at
+ * capture. Worded with describeWindow, so the agent is told the same days staff see on the page.
+ */
+export function closedOutletsSection(rows: OutletRow[], now: number): string {
+  const live = rows.filter(
+    (r) => r.outlet?.trim() && (r.ends_at == null || new Date(r.ends_at).getTime() > now)
+  );
+  if (live.length === 0) return "";
+  const lines = live.map((r) => {
+    const note = r.note?.trim() ? ` — ${r.note.trim()}` : "";
+    return `- ${r.outlet.trim()} — closed ${describeWindow(r.starts_at, r.ends_at, now, { long: true })}${note}`;
+  });
+  return [
+    "## Closed Outlets (overrides everything)",
+    // "ONLY the dates written" and the Calendar check are measured, not decoration: without them a
+    // Sunday closure made the agent turn down Saturday bookings too.
+    "These outlets are closed for the times shown. Do NOT take a reservation, takeaway order or booking for one of them during its closure, and never recap or confirm one. A closure covers ONLY the dates written on its line — the day before and the day after are open as normal. Check the guest's date against the Calendar before deciding. Mention a closure only when the guest's request falls inside it: then say that outlet is closed then, and offer another day, or another outlet if one is open.",
+    ...lines,
+  ].join("\n");
+}
+
 export async function getUnavailableBlock(businessId: string): Promise<string> {
   try {
     const now = Date.now();
@@ -129,27 +156,13 @@ export async function getUnavailableBlock(businessId: string): Promise<string> {
     const dishes = (dishesRes.error ? [] : ((dishesRes.data ?? []) as DishRow[])).filter((r) =>
       isActive(r, now)
     );
-    const outlets = (outletsRes.error ? [] : ((outletsRes.data ?? []) as OutletRow[])).filter((r) =>
-      isActive(r, now)
-    );
+    const outlets = outletsRes.error ? [] : ((outletsRes.data ?? []) as OutletRow[]);
 
     const sections: string[] = [];
 
     // Closed outlets first — a closure overrides everything (including any dish lines for that outlet).
-    if (outlets.length > 0) {
-      const lines = outlets.map((r) => {
-        const until = r.ends_at ? `until ${istTime(r.ends_at)}` : "until further notice";
-        const note = r.note?.trim() ? ` — ${r.note.trim()}` : "";
-        return `- ${r.outlet.trim()} (${until})${note}`;
-      });
-      sections.push(
-        [
-          "## Closed Outlets (overrides everything)",
-          "These outlets are fully closed right now. Do NOT take reservations, takeaway orders, or bookings for them, and do not suggest visiting them. If a guest asks about one, say that outlet is closed (until the time shown, if any) and offer another outlet if one is open.",
-          ...lines,
-        ].join("\n")
-      );
-    }
+    const outletSection = closedOutletsSection(outlets, now);
+    if (outletSection) sections.push(outletSection);
 
     if (dishes.length > 0) {
       const lines = dishes.map((r) => {
