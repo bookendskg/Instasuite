@@ -247,7 +247,7 @@ export function refersToPastOrder(text: string): boolean {
 //
 // The 15-minute grace is for "a table right now" / an ASAP pickup, which the agent writes as the
 // current minute; the capture lands seconds later and would otherwise refuse the keenest guests.
-// Null → false: a handoff with no pinned date can't be judged (same stance as isClosedOn).
+// Null → false: a handoff with no pinned date can't be judged (same stance as findClosedDay).
 const PAST_GRACE_MS = 15 * 60 * 1000;
 
 export function isPastBooking(scheduledAtIso: string | null, nowMs: number): boolean {

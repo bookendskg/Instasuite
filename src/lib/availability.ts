@@ -44,7 +44,7 @@ function isActive(r: { starts_at: string; ends_at: string | null }, now: number)
 // Does an order's outlet fall under an ACTIVE closure from the Unavailable tab?
 //
 // This exists because the Unavailable tab and the Closed Days feature write to two different
-// tables, and only one of them was ever enforced. `closed_days` has isClosedOn() gating the
+// tables, and only one of them was ever enforced. `closed_days` has findClosedDay() gating the
 // webhook; `unavailable_outlets` had nothing but the prompt block above — and the prompt lost.
 // On 15 Sep, with Piplod marked closed, the agent offered Piplod as an option in its very first
 // reply, confirmed it when the guest picked it, and a colleague had to interrupt with "Piplod is
@@ -61,7 +61,7 @@ function isActive(r: { starts_at: string; ends_at: string | null }, now: number)
  * share "Surat", so matching on any common token would shut every Surat outlet the moment one
  * of them closed.
  */
-function sameOutlet(closure: string, ordered: string): boolean {
+export function sameOutlet(closure: string, ordered: string): boolean {
   const key = (v: string) =>
     v.split(",")[0].trim().toLowerCase().replace(/[^a-z0-9 ]/g, "");
   const a = key(closure);
@@ -72,41 +72,53 @@ function sameOutlet(closure: string, ordered: string): boolean {
   return a === b || a.startsWith(b) || b.startsWith(a);
 }
 
-export async function isOutletUnavailable(
+/**
+ * Does this business have exactly one outlet? Then any outlet-scoped closure covers every booking,
+ * whatever the agent called the place. Answers false on error, which falls back to name matching.
+ */
+export async function isSoleOutlet(businessId: string): Promise<boolean> {
+  try {
+    const { data, error } = await supabaseAdmin.from("outlets").select("id").eq("business_id", businessId);
+    return !error && (data ?? []).length === 1;
+  } catch {
+    return false;
+  }
+}
+
+/** The closure that blocks this booking, or null — so the webhook can tell the guest when it is. */
+export async function findOutletClosure(
   businessId: string,
   outlet: string | null,
   whenIso: string | null
-): Promise<boolean> {
+): Promise<OutletRow | null> {
   try {
     const { data, error } = await supabaseAdmin
       .from("unavailable_outlets")
-      .select("outlet, starts_at, ends_at")
+      .select("outlet, note, starts_at, ends_at")
       .eq("business_id", businessId);
-    if (error) return false;
+    if (error) return null;
 
     const rows = ((data ?? []) as OutletRow[]).filter((r) => r.outlet?.trim());
-    if (!rows.length) return false;
+    if (!rows.length) return null;
 
     // An order with no pinned date (parseAbsDate refuses "today"/"Saturday") is one the guest
     // means imminently, so it is judged against NOW. A dated one is judged against its own
     // time — a booking for next week must not be blocked by a closure ending tonight.
     const at = whenIso ? new Date(whenIso).getTime() : Date.now();
-    if (Number.isNaN(at)) return false;
+    if (Number.isNaN(at)) return null;
 
     // A business with a single outlet can't have an order "somewhere else", so an outlet
     // closure covers it whatever the agent called it. Beshak's outlet is stored as "Dumas road
     // Surat" but the agent writes "Beshak Surat" — no name match would ever succeed there.
-    const { data: outlets } = await supabaseAdmin
-      .from("outlets")
-      .select("id")
-      .eq("business_id", businessId);
-    const soleOutlet = (outlets ?? []).length === 1;
+    const soleOutlet = await isSoleOutlet(businessId);
 
-    return rows.some(
-      (r) => isActive(r, at) && (soleOutlet || (outlet ? sameOutlet(r.outlet, outlet) : false))
+    return (
+      rows.find(
+        (r) => isActive(r, at) && (soleOutlet || (outlet ? sameOutlet(r.outlet, outlet) : false))
+      ) ?? null
     );
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -115,7 +127,7 @@ export async function isOutletUnavailable(
  *
  * It used to list only closures in effect right now. A closure set today for Sunday was on the
  * Unavailable page but invisible to the agent until Sunday, so a guest asking for Sunday gave every
- * detail, got a recap, and was only turned down when isOutletUnavailable caught the booking at
+ * detail, got a recap, and was only turned down when findOutletClosure caught the booking at
  * capture. Worded with describeWindow, so the agent is told the same days staff see on the page.
  */
 export function closedOutletsSection(rows: OutletRow[], now: number): string {

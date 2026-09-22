@@ -1,11 +1,12 @@
 import { supabaseAdmin } from "@/lib/supabase";
+import { isSoleOutlet, sameOutlet } from "@/lib/availability";
 import { istWeekday, istDateKey, istDayStart, istDayLabel, WEEKDAY_NAMES } from "@/lib/ist";
 
 // Days an outlet simply isn't open — a standing weekly closure ("every Tuesday") or one specific
 // date. Two consumers live here together on purpose:
 //
 //   closedDaysBlock()  -> the text the AI is given
-//   isClosedOn()       -> the gate the webhook enforces
+//   findClosedDay()    -> the gate the webhook enforces
 //
 // Keeping them in one module is the point. The takeaway rule learned this the hard way (0027: "the
 // prompt states the rule, the code is what makes it true") — if the prompt and the enforcement read
@@ -36,13 +37,20 @@ export async function listClosedDays(businessId: string): Promise<ClosedDay[]> {
   }
 }
 
-// Does a rule cover this outlet? A NULL outlet on the rule means "all of them". Compared
-// case-insensitively on trimmed text because `outlet` is free text on both sides — the Unavailable
-// dropdown writes the name straight through, and a stray space shouldn't silently disable a closure.
-function coversOutlet(rule: ClosedDay, outlet: string | null): boolean {
+// Does a rule cover this outlet? A NULL outlet on the rule means "all of them".
+//
+// Matched the way closed OUTLETS are (availability.ts), not by exact name. It used to require the
+// exact text, and the two sides never agree for Beshak: the Unavailable dropdown stores its one
+// outlet as "Dumas road Surat" while the agent writes "Beshak Surat" on every order. A closed day
+// saved for that outlet was therefore invisible to this check, and a booking the agent wrongly
+// recapped for that day would have been saved. So: a business with one outlet is covered whatever
+// the agent called it, and otherwise names are compared with sameOutlet ("Uni" matches
+// "University Road", Piplod never matches Vesu).
+function coversOutlet(rule: ClosedDay, outlet: string | null, soleOutlet: boolean): boolean {
   if (!rule.outlet) return true;
+  if (soleOutlet) return true;
   if (!outlet) return false;
-  return rule.outlet.trim().toLowerCase() === outlet.trim().toLowerCase();
+  return sameOutlet(rule.outlet, outlet);
 }
 
 function hits(rule: ClosedDay, ms: number): boolean {
@@ -52,24 +60,27 @@ function hits(rule: ClosedDay, ms: number): boolean {
 }
 
 /**
- * Is the business closed on the IST day this instant falls in?
+ * The closed-day rule covering the IST day this instant falls in, or null. Returned (not just a
+ * yes/no) so the webhook can tell the guest which day is closed.
  *
  * `scheduledAtIso` is orders.scheduled_at — already a UTC instant derived from the guest's IST
  * wall-clock. A null date means the AI never pinned one down (parseAbsDate deliberately refuses
- * "today"/"Saturday"), and there is nothing to block against, so this answers false rather than
+ * "today"/"Saturday"), and there is nothing to block against, so this answers null rather than
  * guessing: blocking a booking whose date we don't actually know would be worse than missing one.
  */
-export async function isClosedOn(
+export async function findClosedDay(
   businessId: string,
   scheduledAtIso: string | null,
   outlet: string | null
-): Promise<boolean> {
-  if (!scheduledAtIso) return false;
+): Promise<ClosedDay | null> {
+  if (!scheduledAtIso) return null;
   const ms = new Date(scheduledAtIso).getTime();
-  if (isNaN(ms)) return false;
+  if (isNaN(ms)) return null;
 
   const rules = await listClosedDays(businessId);
-  return rules.some((r) => coversOutlet(r, outlet) && hits(r, ms));
+  if (!rules.length) return null;
+  const soleOutlet = await isSoleOutlet(businessId);
+  return rules.find((r) => coversOutlet(r, outlet, soleOutlet) && hits(r, ms)) ?? null;
 }
 
 // How far ahead to enumerate concrete dates for the AI. Eight weeks covers every realistic booking

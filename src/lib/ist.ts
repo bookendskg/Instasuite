@@ -103,6 +103,17 @@ function dayLabel(ms: number, long = false): string {
     : `${SHORT_DAYS[d.getUTCDay()]} ${d.getUTCDate()} ${SHORT_MONTHS[d.getUTCMonth()]}`;
 }
 
+/** "Sunday 27 September 2026" for an instant — the full form guests and the AI read best. */
+export function istLongDate(ms: number): string {
+  return dayLabel(ms, true);
+}
+
+/** A "YYYY-MM-DD" IST date (a `date` column) → "Fri 25 Sep", for lists. Returns the input if unparseable. */
+export function istShortDateFromKey(key: string): string {
+  const t = new Date(`${key}T00:00:00Z`).getTime();
+  return isNaN(t) ? key : dayLabel(t - IST_OFFSET_MS);
+}
+
 function clockLabel(ms: number): string {
   return new Date(ms).toLocaleTimeString("en-IN", {
     timeZone: "Asia/Kolkata",

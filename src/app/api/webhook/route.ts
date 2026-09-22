@@ -15,6 +15,7 @@ import {
   isTrivialAck,
   cannedWelcome,
   pastTimeReply,
+  closedReply,
   mergeConsecutiveTurns,
 } from "@/lib/message-triage";
 import {
@@ -25,8 +26,9 @@ import {
   refersToPastOrder,
   isPastBooking,
 } from "@/lib/order-detect";
-import { isClosedOn } from "@/lib/closed-days";
-import { isOutletUnavailable } from "@/lib/availability";
+import { findClosedDay } from "@/lib/closed-days";
+import { findOutletClosure, isSoleOutlet } from "@/lib/availability";
+import { describeWindow, istLongDate } from "@/lib/ist";
 import { parseIncomingMedia, hasMedia, describeMedia, type Media } from "@/lib/attachments";
 import { isBlocked } from "@/lib/blocklist";
 import { maybeSweepFeedback } from "@/lib/feedback-run";
@@ -455,7 +457,7 @@ async function generateAndSendReply(igAccountId: string, conversationId: string)
     // just been told is in hand.
     //
     // detected.scheduledAt is null when the AI never pinned an absolute date (parseAbsDate refuses
-    // "today"/"Saturday" on purpose); isClosedOn answers false for that rather than guessing, so a
+    // "today"/"Saturday" on purpose); findClosedDay answers null for that rather than guessing, so a
     // dateless handoff passes through as it does today.
     if (detected) {
       // A booking for a time that has already passed. First, because a time that doesn't exist
@@ -477,31 +479,39 @@ async function generateAndSendReply(igAccountId: string, conversationId: string)
       }
 
       // TWO closure systems, and until now only one of them was enforced. `closed_days` is the
-      // standing "every Tuesday / this date" rule that isClosedOn covers. The Unavailable tab
-      // writes somewhere else entirely — `unavailable_outlets`, a "shut right now until X"
-      // window — and that had nothing behind it but the prompt. Hence Piplod being offered,
-      // confirmed, and only stopped by a colleague typing "Piplod is closed today".
-      if (await isOutletUnavailable(account.businessId, detected.outlet, detected.scheduledAt)) {
+      // standing "every Tuesday / this date" rule. The Unavailable tab writes somewhere else
+      // entirely — `unavailable_outlets`, a time window — and that had nothing behind it but the
+      // prompt. Hence Piplod being offered, confirmed, and only stopped by a colleague typing
+      // "Piplod is closed today".
+      //
+      // Either way the recap is discarded and nothing is captured. The guest is then told why,
+      // straight away, and the agent stays on so they can pick another date — the same shape as
+      // the past-time branch above. This used to hand the chat to staff and send NOTHING, leaving
+      // the guest waiting on someone to notice. Where a business has one outlet the guest hears
+      // the brand ("Beshak"), not the internal outlet name ("Dumas road Surat").
+      const outletClosure = await findOutletClosure(account.businessId, detected.outlet, detected.scheduledAt);
+      const closedDay = outletClosure
+        ? null
+        : await findClosedDay(account.businessId, detected.scheduledAt, detected.outlet);
+      if (outletClosure || closedDay) {
+        const sole = await isSoleOutlet(account.businessId);
+        let place: string;
+        let when: string;
+        if (outletClosure) {
+          place = sole ? account.businessName : outletClosure.outlet.trim();
+          const window = describeWindow(outletClosure.starts_at, outletClosure.ends_at, Date.now(), { long: true });
+          // "Sunday 27 September 2026 (all day)" reads as "closed on Sunday…"; "until …",
+          // "through …" and "today (…)" already read on their own.
+          when = /^[A-Z][a-z]+day /.test(window) ? `on ${window}` : window;
+        } else {
+          place = sole || !closedDay!.outlet ? account.businessName : closedDay!.outlet.trim();
+          when = `on ${istLongDate(new Date(detected.scheduledAt!).getTime())}`;
+        }
         console.warn(
-          `Model booked a ${detected.kind} at a closed outlet for @${account.username} (${detected.outlet}) — discarding.`
+          `Model booked a ${detected.kind} while ${place} is closed ${when} for @${account.username} — told the guest.`
         );
         await recordUsage(account, ai);
-        await supabaseAdmin
-          .from("instagram_conversations")
-          .update({ mode: "human", human_handoff_reason: "closed_day" })
-          .eq("id", conversation.id);
-        return;
-      }
-
-      if (await isClosedOn(account.businessId, detected.scheduledAt, detected.outlet)) {
-        console.warn(
-          `Model booked a ${detected.kind} on a closed day for @${account.username} (${detected.scheduledAt}) — discarding.`
-        );
-        await recordUsage(account, ai);
-        await supabaseAdmin
-          .from("instagram_conversations")
-          .update({ mode: "human", human_handoff_reason: "closed_day" })
-          .eq("id", conversation.id);
+        await sendCannedReply(account, conversation.id, igsid, closedReply(detected.kind, place, when));
         return;
       }
     }

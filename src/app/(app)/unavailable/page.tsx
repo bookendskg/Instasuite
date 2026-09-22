@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Plus, CircleSlash, UtensilsCrossed, Store, AlertTriangle, X, CalendarX } from "lucide-react";
-import { WEEKDAY_NAMES, describeWindow, istToday } from "@/lib/ist";
+import { WEEKDAY_NAMES, describeWindow, istToday, istShortDateFromKey } from "@/lib/ist";
 
 // Three lists. CLOSED DAYS sits on top — a standing "we don't open Tuesdays" is a different kind of
 // fact from "we ran out of tiramisu", and it outranks both. Below it, two columns: 86'd DISHES (left)
@@ -815,7 +815,7 @@ function ClosedDaysPanel({ businesses, businessId, setBusinessId }: ColProps) {
                     {r.outlet || "All outlets"}
                   </p>
                   <span className="rounded-full bg-[var(--danger-soft)] px-2 py-0.5 text-[10px] font-bold text-[var(--danger)]">
-                    {r.weekday != null ? `every ${WEEKDAY_NAMES[r.weekday]}` : r.on_date}
+                    {r.weekday != null ? `every ${WEEKDAY_NAMES[r.weekday]}` : r.on_date ? istShortDateFromKey(r.on_date) : ""}
                   </span>
                   {showBiz && r.business_name && (
                     <span className="text-[10px] text-[var(--text-5)]">{r.business_name}</span>

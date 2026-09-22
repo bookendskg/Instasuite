@@ -103,6 +103,23 @@ export function pastTimeReply(kind: "reservation" | "takeaway"): string {
     : "Just to check — that date and time has already passed. Which date and time would you like to book for?";
 }
 
+/**
+ * What a guest is told when their booking lands on a closed day or a closed outlet.
+ *
+ * Until now they were told nothing: the recap was discarded and the chat went quietly to staff, so
+ * the guest waited on a reply that depended on someone noticing. Like pastTimeReply, this names the
+ * problem and asks for another choice, and the agent stays on to take it.
+ *
+ * `when` arrives ready to read ("on Sunday 27 September 2026", "until Wednesday 23 September 2026,
+ * 3:00 pm"). The closure's note is deliberately never passed in: notes are written for staff
+ * ("staff shortage", "fully reserved till closing time"), not for guests.
+ */
+export function closedReply(kind: "reservation" | "takeaway", place: string, when: string): string {
+  return kind === "takeaway"
+    ? `Sorry, ${place} is closed ${when}, so we can't take a pickup then. Would another day or time work for you?`
+    : `Sorry, ${place} is closed ${when}. Would another date work for you?`;
+}
+
 type Turn = { role: "user" | "assistant"; content: string };
 
 /**
